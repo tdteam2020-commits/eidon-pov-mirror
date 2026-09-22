@@ -1,0 +1,48 @@
+name: mirror-eidon-pov
+on:
+  workflow_dispatch:
+    inputs:
+      max_gb:
+        description: "GB tối đa mỗi shard (8 shard × 85 = 680 GB < trần Drive 750 GB/ngày)"
+        default: "85"
+  schedule:
+    - cron: "0 20 * * *"   # 03:00 giờ Việt Nam, mỗi ngày, tới khi đủ thì tự tắt
+permissions:
+  actions: write
+  contents: read
+concurrency: mirror
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - name: rclone
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash >/dev/null
+      - name: config
+        run: mkdir -p ~/.config/rclone && echo "${{ secrets.RCLONE_CONF }}" | base64 -d > ~/.config/rclone/rclone.conf
+      - name: mirror
+        run: bash mirror.sh ${{ matrix.shard }} 8 "${{ github.event.inputs.max_gb || '85' }}"
+  tally:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://rclone.org/install.sh | sudo bash >/dev/null
+      - run: mkdir -p ~/.config/rclone && echo "${{ secrets.RCLONE_CONF }}" | base64 -d > ~/.config/rclone/rclone.conf
+      - name: đếm và tự tắt khi đủ
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rclone lsf --recursive --files-only --format "ps" gdrive:MMO-thu-vien/eidon-pov/ | sort > have.txt
+          awk -F'\t' '{print $1";"$2}' manifest.tsv | sort > want.txt
+          thieu=$(comm -23 want.txt have.txt | wc -l | tr -d ' ')
+          co=$(awk -F';' '{s+=$2} END{printf "%.0f", s/1e9}' have.txt)
+          echo "đã có $co GB · còn thiếu/lệch $thieu file trên $(wc -l < want.txt)"
+          if [ "$thieu" -eq 0 ]; then echo "ĐỦ — tắt lịch"; gh workflow disable mirror-eidon-pov; fi
